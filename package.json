@@ -1,0 +1,13 @@
+{
+  "name": "bring-a-friend",
+  "private": true,
+  "packageManager": "pnpm@12.5.1",
+  "scripts": {
+    "dev": "concurrently -k -n sync,web,agent -c blue,magenta,green \"pnpm --filter @baf/sync dev\" \"pnpm --filter @baf/web dev\" \"pnpm dev:agent\"",
+    "dev:agent": "cd apps/agent && uv run python -m app",
+    "test": "pnpm -r test && cd apps/agent && uv run pytest"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.5"
+  }
+}
