@@ -1,0 +1,9 @@
+{
+  "name": "@baf/doc-schema",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "peerDependencies": {
+    "yjs": "^13.6.32"
+  }
+}
