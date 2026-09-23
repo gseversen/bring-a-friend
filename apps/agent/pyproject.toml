@@ -1,0 +1,19 @@
+[project]
+name = "baf-agent"
+version = "0.1.0"
+description = "LangGraph agent that streams its steps into a shared Yjs room"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "anthropic>=1.8.0",
+    "fastapi>=0.141.1",
+    "httpx2>=2.13.1",
+    "langgraph>=1.2.12",
+    "pydantic-settings>=2.15.0",
+    "uvicorn>=0.53.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=9.1.1"]
+
+[tool.uv]
+package = false
