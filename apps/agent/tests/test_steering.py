@@ -144,6 +144,8 @@ def test_rejection_goes_back_to_the_model_as_a_tool_result():
         "is_error": True,
     }
     assert recorder.humans() == [("Ben", "reject")]
+    human = next(e for e in recorder.events() if e["type"] == "human")
+    assert human["content"] == "Ben rejected send_email: don't email the team yet"
     assert "did not send the email" in recorder.events()[-1]["content"]
 
 

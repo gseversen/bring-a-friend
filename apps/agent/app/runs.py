@@ -189,7 +189,9 @@ class RunManager:
             run.pending_approval = None
             await self._update(run, status="running", pendingApproval=None)
             detail = f": {reason}" if reason else ""
-            await self._human(run, by, "approve" if approved else "reject", f"{by} {verb}d {tool}{detail}")
+            await self._human(
+                run, by, "approve" if approved else "reject", f"{by} {'approved' if approved else 'rejected'} {tool}{detail}"
+            )
             # Command(resume=...) re-runs the approval node, and interrupt()
             # returns this value there. It records who decided and why.
             self._drive(run, Command(resume={"approved": approved, "by": by, "reason": reason}))
