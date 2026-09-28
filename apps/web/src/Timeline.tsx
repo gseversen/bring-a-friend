@@ -33,7 +33,7 @@ export function Timeline({ run, events }: Props) {
         {" · started by "}
         {run.startedBy}
         {" · "}
-        <span className={run.status === "error" ? "text-red-600" : ""}>{run.status}</span>
+        <span className={run.status === "error" ? "text-red-600" : ""}>{run.status?.replace("_", " ")}</span>
       </div>
       <ol className="flex flex-col gap-2">
         {events.map((event) => (
@@ -43,9 +43,10 @@ export function Timeline({ run, events }: Props) {
                 {LABELS[event.type].text}
               </span>
               {event.toolName && <code className="text-xs text-slate-500">{event.toolName}</code>}
+              {event.actor && <span className="text-xs font-medium text-slate-600">{event.actor}</span>}
               <time className="ml-auto text-xs text-slate-400">{new Date(event.ts).toLocaleTimeString()}</time>
             </div>
-            {event.type === "tool_call" ? (
+            {event.type === "tool_call" || event.type === "approval_request" ? (
               <pre className="overflow-x-auto text-xs text-slate-700">{JSON.stringify(event.args, null, 2)}</pre>
             ) : (
               <p className="whitespace-pre-wrap text-slate-800">{event.content}</p>
@@ -53,7 +54,11 @@ export function Timeline({ run, events }: Props) {
           </li>
         ))}
       </ol>
-      {run.status === "running" && <p className="animate-pulse text-sm text-slate-500">Agent is working…</p>}
+      {(run.status === "running" || run.status === "pausing") && (
+        <p className="animate-pulse text-sm text-slate-500">
+          {run.status === "pausing" ? "Pausing after the current step…" : "Agent is working…"}
+        </p>
+      )}
       <div ref={bottom} />
     </div>
   );
