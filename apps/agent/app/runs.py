@@ -8,6 +8,7 @@ from typing import Any
 from langgraph.types import Command
 
 from app.events import HumanAction, RunInfo, RunStatus, TimelineEvent, events_from_update
+from app.graph import redirect_message
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,21 @@ class RunManager:
             raise
         self._drive(run, {"messages": [{"role": "user", "content": task}]})
         return run.id
+
+    async def redirect(self, run_id: str, by: str, instruction: str) -> None:
+        run = await self._get(run_id)
+        async with run.lock:
+            if run.status != "paused":
+                hint = " (pause it first)" if run.status == "running" else ""
+                raise Conflict(f"Can't redirect: the run is {DESCRIBE[run.status]}{hint}")
+            config = self._config(run)
+            snapshot = await self.graph.aget_state(config)
+            message = redirect_message(snapshot.values["messages"], by, instruction)
+            # aupdate_state writes a new checkpoint as if the `tools` node had
+            # produced this update. The graph's edges then decide what runs
+            # next: tools -> agent, so the model sees the instruction on resume.
+            await self.graph.aupdate_state(config, {"messages": [message]}, as_node="tools")
+            await self._human(run, by, "redirect", f"{by} redirected the agent: {instruction}")
 
     async def decide(self, run_id: str, by: str, approval_id: str, approved: bool, reason: str | None) -> None:
         run = await self._get(run_id)

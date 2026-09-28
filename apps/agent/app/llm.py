@@ -102,5 +102,10 @@ class MockLLM:
         last = messages[-1]["content"]
         rejected = isinstance(last, list) and any(b.get("is_error") for b in last)
         email = "I did not send the email because it was rejected." if rejected else "I emailed the team a summary."
+        instructions = [
+            b["text"] for m in messages[1:] if m["role"] == "user" and isinstance(m["content"], list)
+            for b in m["content"] if b["type"] == "text"
+        ]
+        followed = f" {instructions[-1]} (noted)." if instructions else ""
         return [{"type": "text", "text": f"Summary of '{task}': three key facts found; "
-                 f"experts disagree on long-term impact. {email} (mock answer)"}]
+                 f"experts disagree on long-term impact. {email}{followed} (mock answer)"}]

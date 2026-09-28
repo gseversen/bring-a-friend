@@ -65,6 +65,10 @@ class ApprovalRequest(CommandRequest):
     reason: str | None = Field(default=None, max_length=500)
 
 
+class RedirectRequest(CommandRequest):
+    instruction: str = Field(min_length=1, max_length=2000)
+
+
 @app.post("/runs", status_code=202)
 async def start_run(req: StartRunRequest) -> dict:
     # Return immediately; clients watch progress through the shared doc, not this response.
@@ -87,6 +91,12 @@ async def resume_run(run_id: str, req: CommandRequest) -> dict:
 @app.get("/health")
 async def health() -> dict:
     return {"ok": True, "model": "mock" if settings.agent_mock_llm else settings.anthropic_model}
+
+
+@app.post("/runs/{run_id}/redirect", status_code=202)
+async def redirect_run(run_id: str, req: RedirectRequest) -> dict:
+    await manager.redirect(run_id, req.by, req.instruction)
+    return {"ok": True}
 
 
 @app.post("/runs/{run_id}/approval", status_code=202)

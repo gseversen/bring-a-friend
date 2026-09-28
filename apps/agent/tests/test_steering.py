@@ -208,3 +208,101 @@ def test_approval_resume_does_not_rerun_safe_tools_from_the_same_turn(monkeypatc
 
     asyncio.run(main())
     assert ran == ["search_web", "send_email"]
+
+
+class RecordingLLM(MockLLM):
+    """MockLLM that keeps every message list it was called with."""
+
+    def __init__(self, delay_s: float = 0):
+        super().__init__(delay_s)
+        self.calls: list[list[dict]] = []
+
+    async def __call__(self, messages: list[dict]) -> list[dict]:
+        self.calls.append(messages)
+        return await super().__call__(messages)
+
+
+def assert_every_tool_use_is_answered(messages: list[dict]) -> None:
+    """The Messages API rule: each tool_use must be answered by a tool_result
+    in the next message."""
+    for i, message in enumerate(messages):
+        if message["role"] != "assistant":
+            continue
+        call_ids = {b["id"] for b in message["content"] if b["type"] == "tool_use"}
+        if not call_ids:
+            continue
+        answer = messages[i + 1]["content"]
+        assert {b["tool_use_id"] for b in answer if b["type"] == "tool_result"} == call_ids
+
+
+def test_redirect_answers_pending_tool_calls_before_the_instruction():
+    llm = RecordingLLM(delay_s=0.2)
+
+    async def main():
+        recorder = Recorder()
+        manager = RunManager(build_graph(llm, InMemorySaver()), recorder.send)
+        run_id = await manager.start("demo", "solar power", "Ann")
+        await manager.pause(run_id, "Ben")
+        await manager.wait(run_id)
+        config = {"configurable": {"thread_id": run_id}}
+
+        before = await manager.graph.aget_state(config)
+        assert before.next == ("tools",)
+        pending_ids = [b["id"] for b in before.values["messages"][-1]["content"] if b["type"] == "tool_use"]
+        assert pending_ids == ["mock_0"]
+
+        await manager.redirect(run_id, "Cy", "focus on costs")
+
+        after = await manager.graph.aget_state(config)
+        assert after.next == ("agent",)  # as_node="tools" routes to the model, skipping the pending tools
+        assert after.metadata["room"] == "demo"  # still recoverable after a restart
+        assert after.values["messages"][-1] == {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "mock_0", "content": "Not run: Cy redirected the agent",
+                 "is_error": True},
+                {"type": "text", "text": "New instruction from Cy: focus on costs"},
+            ],
+        }
+
+        await manager.resume(run_id, "Dee")
+        await approve_pending(manager, run_id)
+        return recorder
+
+    recorder = asyncio.run(main())
+    for messages in llm.calls:
+        assert_every_tool_use_is_answered(messages)
+    assert recorder.humans() == [("Ben", "pause"), ("Cy", "redirect"), ("Dee", "resume"), ("Dee", "approve")]
+    assert "focus on costs" in recorder.events()[-1]["content"]
+
+
+def test_redirect_after_tools_ran_adds_only_the_instruction():
+    async def main():
+        manager, _ = new_manager()
+        run_id = await manager.start("demo", "solar power", "Ann")
+        await manager.pause(run_id, "Ben")  # stops after the first node (agent)
+        await manager.wait(run_id)
+        await manager.resume(run_id, "Ben")
+        await manager.pause(run_id, "Ben")  # stops after the next node (tools)
+        await manager.wait(run_id)
+        config = {"configurable": {"thread_id": run_id}}
+        assert (await manager.graph.aget_state(config)).next == ("agent",)
+
+        await manager.redirect(run_id, "Cy", "be brief")
+        return (await manager.graph.aget_state(config)).values["messages"]
+
+    messages = asyncio.run(main())
+    # The previous message already answered the tool call, so only the instruction is added.
+    assert messages[-2]["content"][0]["type"] == "tool_result"
+    assert messages[-1] == {"role": "user", "content": [{"type": "text", "text": "New instruction from Cy: be brief"}]}
+
+
+def test_redirect_requires_a_paused_run():
+    async def main():
+        manager, _ = new_manager(llm_delay_s=0.2)
+        run_id = await manager.start("demo", "solar power", "Ann")
+        with pytest.raises(Conflict, match=r"Can't redirect: the run is running \(pause it first\)"):
+            await manager.redirect(run_id, "Cy", "be brief")
+        await manager.wait(run_id)
+
+    asyncio.run(main())

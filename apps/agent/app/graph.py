@@ -36,6 +36,23 @@ def _tool_calls(message: dict) -> list[dict]:
     return [b for b in message["content"] if b["type"] == "tool_use"]
 
 
+def redirect_message(messages: list[dict], by: str, instruction: str) -> dict:
+    """The user message that injects a participant's instruction into a paused run.
+
+    If the run paused after the model asked for tools but before they ran, the
+    Messages API requires a tool_result for every pending tool_use, so each one
+    is answered as "not run" ahead of the instruction."""
+    content = []
+    if messages[-1]["role"] == "assistant":
+        content = [
+            {"type": "tool_result", "tool_use_id": call["id"], "content": f"Not run: {by} redirected the agent",
+             "is_error": True}
+            for call in _tool_calls(messages[-1])
+        ]
+    content.append({"type": "text", "text": f"New instruction from {by}: {instruction}"})
+    return {"role": "user", "content": content}
+
+
 def build_graph(llm: LLM, checkpointer: Checkpointer = None):
     async def agent(state: AgentState) -> dict:
         content = await llm(state["messages"])
