@@ -3,10 +3,12 @@ import asyncio
 import pytest
 
 from app import tools
-from app.events import RunInfo, events_from_update
+from langgraph.checkpoint.memory import InMemorySaver
+
+from app.events import events_from_update
 from app.graph import build_graph
 from app.llm import MockLLM, _drop_declined_attempt
-from app.runs import run_task
+from app.runs import RunManager
 
 
 @pytest.fixture(autouse=True)
@@ -20,12 +22,16 @@ def run(graph, task="solar power"):
     async def send(room, message):
         sent.append((room, message))
 
-    asyncio.run(run_task(graph, send, "demo", RunInfo(task=task, started_by="tester")))
+    async def main():
+        manager = RunManager(graph, send)
+        await manager.wait(await manager.start("demo", task, "tester"))
+
+    asyncio.run(main())
     return sent
 
 
 def test_mock_run_streams_every_step_in_order():
-    sent = run(build_graph(MockLLM()))
+    sent = run(build_graph(MockLLM(), InMemorySaver()))
 
     assert all(room == "demo" for room, _ in sent)
     events = [m["event"] for _, m in sent if m["type"] == "event"]
@@ -43,10 +49,10 @@ def test_llm_failure_reports_error_and_finishes_run():
     async def broken_llm(messages):
         raise RuntimeError("boom")
 
-    sent = run(build_graph(broken_llm))
+    sent = run(build_graph(broken_llm, InMemorySaver()))
 
-    assert sent[0][1]["event"]["type"] == "error"
-    assert sent[0][1]["event"]["content"] == "boom"
+    events = [m["event"] for _, m in sent if m["type"] == "event"]
+    assert [(e["type"], e["content"]) for e in events] == [("error", "boom")]
     assert sent[-1][1]["patch"]["status"] == "error"
 
 

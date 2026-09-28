@@ -1,38 +1,46 @@
-import asyncio
 from contextlib import asynccontextmanager
 
 import httpx2
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from langgraph.checkpoint.memory import InMemorySaver
+from fastapi.responses import JSONResponse
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from pydantic import Field
 
 from app.config import settings
-from app.events import CamelModel, RunInfo
+from app.events import CamelModel
 from app.graph import build_graph
 from app.llm import ClaudeLLM, MockLLM
-from app.runs import run_task
+from app.runs import Conflict, NotFound, RunManager
 from app.sync_client import SyncClient
 
-llm = MockLLM() if settings.agent_mock_llm else ClaudeLLM(settings)
-# In-memory for now; swapping in a persistent checkpointer is the first step of pause/resume.
-graph = build_graph(llm, checkpointer=InMemorySaver())
 sync = SyncClient(settings.sync_http_url)
-
-# One run per room at a time. In-memory, like the rest of Milestone 1.
-active_rooms: set[str] = set()
-# asyncio only keeps weak references to tasks; hold them so runs aren't garbage collected.
-background_tasks: set[asyncio.Task] = set()
+manager: RunManager  # created in lifespan, once the checkpointer is open
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    yield
+    global manager
+    settings.checkpoint_db.parent.mkdir(parents=True, exist_ok=True)
+    async with AsyncSqliteSaver.from_conn_string(str(settings.checkpoint_db)) as checkpointer:
+        llm = MockLLM() if settings.agent_mock_llm else ClaudeLLM(settings)
+        manager = RunManager(build_graph(llm, checkpointer=checkpointer), sync.send)
+        yield
     await sync.aclose()
 
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=[settings.web_origin], allow_methods=["POST"], allow_headers=["*"])
+
+
+@app.exception_handler(Conflict)
+async def conflict_handler(_: Request, exc: Conflict) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(NotFound)
+async def not_found_handler(_: Request, exc: NotFound) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
 
 
 class StartRunRequest(CamelModel):
@@ -43,28 +51,12 @@ class StartRunRequest(CamelModel):
 
 @app.post("/runs", status_code=202)
 async def start_run(req: StartRunRequest) -> dict:
-    if req.room in active_rooms:
-        raise HTTPException(409, "A run is already in progress in this room")
-    # Claim the room before awaiting, so two simultaneous requests can't both start a run.
-    active_rooms.add(req.room)
-
-    run = RunInfo(task=req.task, started_by=req.started_by)
     try:
-        await sync.send(req.room, {"type": "run_started", "run": run.dump()})
+        run_id = await manager.start(req.room, req.task, req.started_by)
     except httpx2.HTTPError:
-        active_rooms.discard(req.room)
         raise HTTPException(502, "Sync server unreachable")
-
     # Return immediately; clients watch progress through the shared doc, not this response.
-    task = asyncio.create_task(run_task(graph, sync.send, req.room, run))
-    background_tasks.add(task)
-
-    def cleanup(t: asyncio.Task) -> None:
-        background_tasks.discard(t)
-        active_rooms.discard(req.room)
-
-    task.add_done_callback(cleanup)
-    return {"runId": run.id}
+    return {"runId": run_id}
 
 
 @app.get("/health")
