@@ -25,21 +25,34 @@ class CamelModel(BaseModel):
         return self.model_dump(by_alias=True, exclude_none=True)
 
 
+RunStatus = Literal["idle", "running", "pausing", "paused", "awaiting_approval", "done", "error"]
+HumanAction = Literal["pause", "resume", "approve", "reject", "redirect"]
+
+
+class PendingApproval(CamelModel):
+    id: str
+    tool_name: str
+    args: dict
+
+
 class RunInfo(CamelModel):
     id: str = Field(default_factory=_new_id)
     task: str
-    status: Literal["idle", "running", "done", "error"] = "running"
+    status: RunStatus = "running"
     started_by: str
     started_at: int = Field(default_factory=_now_ms)
+    pending_approval: PendingApproval | None = None
 
 
 class TimelineEvent(CamelModel):
     id: str = Field(default_factory=_new_id)
     run_id: str
-    type: Literal["thought", "tool_call", "tool_result", "final", "error"]
+    type: Literal["thought", "tool_call", "tool_result", "final", "error", "approval_request", "human"]
     content: str
     tool_name: str | None = None
     args: dict | None = None
+    actor: str | None = None
+    action: HumanAction | None = None
     ts: int = Field(default_factory=_now_ms)
 
 
@@ -49,7 +62,8 @@ def events_from_update(node: str, update: dict, run_id: str, tool_names: dict[st
     `tool_names` maps tool_use ids to tool names across the run, because a
     tool_result block only carries the id of the call it answers."""
     events = []
-    for message in update["messages"]:
+    # Nodes that only change other state (e.g. approval decisions) have no messages.
+    for message in update.get("messages", []):
         blocks = message["content"]
         if node == "agent":
             calls_tools = any(b["type"] == "tool_use" for b in blocks)

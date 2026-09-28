@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # All three apps share the repo-root .env.
 ROOT_ENV = Path(__file__).resolve().parents[3] / ".env"
+AGENT_DIR = Path(__file__).resolve().parents[1]
 
 
 class Settings(BaseSettings):
@@ -18,6 +19,8 @@ class Settings(BaseSettings):
     agent_port: int = 8000
     sync_http_url: str = "http://localhost:1234"
     web_origin: str = "http://localhost:5173"
+    # SQLite file holding LangGraph checkpoints, so paused runs survive restarts.
+    checkpoint_db: Path = AGENT_DIR / "data" / "checkpoints.sqlite"
 
 
 settings = Settings()

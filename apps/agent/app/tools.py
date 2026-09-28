@@ -5,6 +5,10 @@ import asyncio
 
 TOOL_DELAY_S = 0.8
 
+# Tools with side effects outside the app. The graph stops for a participant's
+# approval before running any of these.
+RISKY_TOOLS = {"send_email"}
+
 TOOLS = [
     {
         "name": "search_web",
@@ -22,6 +26,19 @@ TOOLS = [
             "type": "object",
             "properties": {"url": {"type": "string"}},
             "required": ["url"],
+        },
+    },
+    {
+        "name": "send_email",
+        "description": "Send an email. A participant must approve each email before it is sent.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "to": {"type": "string"},
+                "subject": {"type": "string"},
+                "body": {"type": "string"},
+            },
+            "required": ["to", "subject", "body"],
         },
     },
     {
@@ -53,6 +70,8 @@ async def run_tool(name: str, args: dict) -> str:
             f"Content of {args['url']}: This page summarizes the topic, lists three key "
             "facts, and notes that experts disagree on long-term impact."
         )
+    if name == "send_email":
+        return f"Email sent to {args['to']} (not really: this tool is fake)."
     if name == "save_note":
         return f"Saved note ({len(args['note'])} chars)."
     raise ValueError(f"Unknown tool: {name}")

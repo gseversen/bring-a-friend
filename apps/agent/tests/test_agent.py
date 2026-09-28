@@ -3,10 +3,12 @@ import asyncio
 import pytest
 
 from app import tools
-from app.events import RunInfo, events_from_update
+from langgraph.checkpoint.memory import InMemorySaver
+
+from app.events import events_from_update
 from app.graph import build_graph
 from app.llm import MockLLM, _drop_declined_attempt
-from app.runs import run_task
+from app.runs import RunManager
 
 
 @pytest.fixture(autouse=True)
@@ -20,12 +22,21 @@ def run(graph, task="solar power"):
     async def send(room, message):
         sent.append((room, message))
 
-    asyncio.run(run_task(graph, send, "demo", RunInfo(task=task, started_by="tester")))
+    async def main():
+        manager = RunManager(graph, send)
+        run_id = await manager.start("demo", task, "tester")
+        await manager.wait(run_id)
+        # The mock script ends with send_email, which waits for approval.
+        if manager.runs[run_id].status == "awaiting_approval":
+            await manager.decide(run_id, "tester", manager.runs[run_id].pending_approval["id"], True, None)
+            await manager.wait(run_id)
+
+    asyncio.run(main())
     return sent
 
 
 def test_mock_run_streams_every_step_in_order():
-    sent = run(build_graph(MockLLM()))
+    sent = run(build_graph(MockLLM(delay_s=0), InMemorySaver()))
 
     assert all(room == "demo" for room, _ in sent)
     events = [m["event"] for _, m in sent if m["type"] == "event"]
@@ -33,21 +44,24 @@ def test_mock_run_streams_every_step_in_order():
         "thought", "tool_call", "tool_result",
         "thought", "tool_call", "tool_result",
         "thought", "tool_call", "tool_result",
+        "thought", "tool_call", "approval_request", "human", "tool_result",
         "final",
     ]
-    assert [e["toolName"] for e in events if e["type"] == "tool_result"] == ["search_web", "read_page", "save_note"]
-    assert sent[-1][1] == {"type": "run_finished", "runId": events[0]["runId"], "status": "done"}
+    assert [e["toolName"] for e in events if e["type"] == "tool_result"] == [
+        "search_web", "read_page", "save_note", "send_email"
+    ]
+    assert sent[-1][1] == {"type": "run_updated", "runId": events[0]["runId"], "patch": {"status": "done"}}
 
 
 def test_llm_failure_reports_error_and_finishes_run():
     async def broken_llm(messages):
         raise RuntimeError("boom")
 
-    sent = run(build_graph(broken_llm))
+    sent = run(build_graph(broken_llm, InMemorySaver()))
 
-    assert sent[0][1]["event"]["type"] == "error"
-    assert sent[0][1]["event"]["content"] == "boom"
-    assert sent[-1][1]["status"] == "error"
+    events = [m["event"] for _, m in sent if m["type"] == "event"]
+    assert [(e["type"], e["content"]) for e in events] == [("error", "boom")]
+    assert sent[-1][1]["patch"]["status"] == "error"
 
 
 def test_text_is_narration_when_tools_are_called_and_final_otherwise():

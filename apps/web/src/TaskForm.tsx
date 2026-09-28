@@ -1,14 +1,14 @@
 import { useState, type FormEvent } from "react";
-
-const AGENT_URL = import.meta.env.VITE_AGENT_URL ?? "http://localhost:8000";
+import { postToAgent } from "./api";
 
 interface Props {
   room: string;
   userName: string;
-  running: boolean;
+  // True while the room's run is unfinished (running, paused, awaiting approval…).
+  busy: boolean;
 }
 
-export function TaskForm({ room, userName, running }: Props) {
+export function TaskForm({ room, userName, busy }: Props) {
   const [task, setTask] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -17,25 +17,12 @@ export function TaskForm({ room, userName, running }: Props) {
     e.preventDefault();
     setError(null);
     setSubmitting(true);
-    try {
-      // Only starts the run. Progress comes back through the shared doc, so
-      // every client (not just this one) sees it.
-      const res = await fetch(`${AGENT_URL}/runs`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ room, task, startedBy: userName }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        setError(typeof body?.detail === "string" ? body.detail : `Agent returned ${res.status}`);
-        return;
-      }
-      setTask("");
-    } catch {
-      setError("Could not reach the agent service.");
-    } finally {
-      setSubmitting(false);
-    }
+    // Only starts the run. Progress comes back through the shared doc, so
+    // every client (not just this one) sees it.
+    const err = await postToAgent("/runs", { room, task, startedBy: userName });
+    setSubmitting(false);
+    if (err) setError(err);
+    else setTask("");
   }
 
   return (
@@ -49,10 +36,10 @@ export function TaskForm({ room, userName, running }: Props) {
         />
         <button
           type="submit"
-          disabled={!task.trim() || running || submitting}
+          disabled={!task.trim() || busy || submitting}
           className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
         >
-          {running ? "Agent working…" : "Start task"}
+          {busy ? "Run in progress" : "Start task"}
         </button>
       </div>
       {error && <p className="text-sm text-red-600">{error}</p>}
