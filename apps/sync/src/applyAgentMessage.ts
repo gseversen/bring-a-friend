@@ -19,9 +19,9 @@ export function applyAgentMessage(doc: Y.Doc, msg: AgentMessage): void {
         if (run.get("id") !== msg.event.runId) return;
         timeline.push([msg.event]);
         break;
-      case "run_finished":
+      case "run_updated":
         if (run.get("id") !== msg.runId) return;
-        run.set("status", msg.status);
+        for (const [key, value] of Object.entries(msg.patch)) run.set(key, value);
         break;
     }
   });

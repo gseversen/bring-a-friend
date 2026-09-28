@@ -23,8 +23,22 @@ test("events are appended in order and stale runs are ignored", () => {
   applyAgentMessage(doc, { type: "event", event: event("r1", "e1") });
   applyAgentMessage(doc, { type: "event", event: event("old", "e2") });
   applyAgentMessage(doc, { type: "event", event: event("r1", "e3") });
-  applyAgentMessage(doc, { type: "run_finished", runId: "r1", status: "done" });
+  applyAgentMessage(doc, { type: "run_updated", runId: "r1", patch: { status: "done" } });
 
   assert.deepEqual(getTimeline(doc).toArray().map((e) => e.id), ["e1", "e3"]);
   assert.equal(getRun(doc).get("status"), "done");
+});
+
+test("run_updated patches fields and ignores stale runs", () => {
+  const doc = new Y.Doc();
+  const approval = { id: "toolu_1", toolName: "send_email", args: { to: "a@b.c" } };
+  applyAgentMessage(doc, { type: "run_started", run: run("r1") });
+  applyAgentMessage(doc, { type: "run_updated", runId: "r1", patch: { status: "awaiting_approval", pendingApproval: approval } });
+  applyAgentMessage(doc, { type: "run_updated", runId: "old", patch: { status: "done" } });
+
+  assert.equal(getRun(doc).get("status"), "awaiting_approval");
+  assert.deepEqual(getRun(doc).get("pendingApproval"), approval);
+
+  applyAgentMessage(doc, { type: "run_updated", runId: "r1", patch: { status: "running", pendingApproval: null } });
+  assert.equal(getRun(doc).get("pendingApproval"), null);
 });

@@ -25,21 +25,34 @@ class CamelModel(BaseModel):
         return self.model_dump(by_alias=True, exclude_none=True)
 
 
+RunStatus = Literal["idle", "running", "pausing", "paused", "awaiting_approval", "done", "error"]
+HumanAction = Literal["pause", "resume", "approve", "reject", "redirect"]
+
+
+class PendingApproval(CamelModel):
+    id: str
+    tool_name: str
+    args: dict
+
+
 class RunInfo(CamelModel):
     id: str = Field(default_factory=_new_id)
     task: str
-    status: Literal["idle", "running", "done", "error"] = "running"
+    status: RunStatus = "running"
     started_by: str
     started_at: int = Field(default_factory=_now_ms)
+    pending_approval: PendingApproval | None = None
 
 
 class TimelineEvent(CamelModel):
     id: str = Field(default_factory=_new_id)
     run_id: str
-    type: Literal["thought", "tool_call", "tool_result", "final", "error"]
+    type: Literal["thought", "tool_call", "tool_result", "final", "error", "approval_request", "human"]
     content: str
     tool_name: str | None = None
     args: dict | None = None
+    actor: str | None = None
+    action: HumanAction | None = None
     ts: int = Field(default_factory=_now_ms)
 
 

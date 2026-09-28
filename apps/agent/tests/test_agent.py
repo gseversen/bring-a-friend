@@ -36,7 +36,7 @@ def test_mock_run_streams_every_step_in_order():
         "final",
     ]
     assert [e["toolName"] for e in events if e["type"] == "tool_result"] == ["search_web", "read_page", "save_note"]
-    assert sent[-1][1] == {"type": "run_finished", "runId": events[0]["runId"], "status": "done"}
+    assert sent[-1][1] == {"type": "run_updated", "runId": events[0]["runId"], "patch": {"status": "done"}}
 
 
 def test_llm_failure_reports_error_and_finishes_run():
@@ -47,7 +47,7 @@ def test_llm_failure_reports_error_and_finishes_run():
 
     assert sent[0][1]["event"]["type"] == "error"
     assert sent[0][1]["event"]["content"] == "boom"
-    assert sent[-1][1]["status"] == "error"
+    assert sent[-1][1]["patch"]["status"] == "error"
 
 
 def test_text_is_narration_when_tools_are_called_and_final_otherwise():

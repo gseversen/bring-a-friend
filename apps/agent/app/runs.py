@@ -33,4 +33,4 @@ async def run_task(graph, send: Send, room: str, run: RunInfo) -> None:
             event = TimelineEvent(run_id=run.id, type="error", content=str(exc))
             await send(room, {"type": "event", "event": event.dump()})
     with suppress(Exception):
-        await send(room, {"type": "run_finished", "runId": run.id, "status": status})
+        await send(room, {"type": "run_updated", "runId": run.id, "patch": {"status": status}})
