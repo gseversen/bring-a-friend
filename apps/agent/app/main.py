@@ -58,6 +58,13 @@ class CommandRequest(CamelModel):
     by: str = Field(min_length=1, max_length=100)
 
 
+class ApprovalRequest(CommandRequest):
+    # The expected state: which pending tool call this decision is for.
+    approval_id: str
+    approved: bool
+    reason: str | None = Field(default=None, max_length=500)
+
+
 @app.post("/runs", status_code=202)
 async def start_run(req: StartRunRequest) -> dict:
     # Return immediately; clients watch progress through the shared doc, not this response.
@@ -80,3 +87,9 @@ async def resume_run(run_id: str, req: CommandRequest) -> dict:
 @app.get("/health")
 async def health() -> dict:
     return {"ok": True, "model": "mock" if settings.agent_mock_llm else settings.anthropic_model}
+
+
+@app.post("/runs/{run_id}/approval", status_code=202)
+async def decide_approval(run_id: str, req: ApprovalRequest) -> dict:
+    await manager.decide(run_id, req.by, req.approval_id, req.approved, req.reason)
+    return {"ok": True}

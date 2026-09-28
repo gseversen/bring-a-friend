@@ -62,7 +62,8 @@ def events_from_update(node: str, update: dict, run_id: str, tool_names: dict[st
     `tool_names` maps tool_use ids to tool names across the run, because a
     tool_result block only carries the id of the call it answers."""
     events = []
-    for message in update["messages"]:
+    # Nodes that only change other state (e.g. approval decisions) have no messages.
+    for message in update.get("messages", []):
         blocks = message["content"]
         if node == "agent":
             calls_tools = any(b["type"] == "tool_use" for b in blocks)

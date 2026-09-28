@@ -24,14 +24,19 @@ def run(graph, task="solar power"):
 
     async def main():
         manager = RunManager(graph, send)
-        await manager.wait(await manager.start("demo", task, "tester"))
+        run_id = await manager.start("demo", task, "tester")
+        await manager.wait(run_id)
+        # The mock script ends with send_email, which waits for approval.
+        if manager.runs[run_id].status == "awaiting_approval":
+            await manager.decide(run_id, "tester", manager.runs[run_id].pending_approval["id"], True, None)
+            await manager.wait(run_id)
 
     asyncio.run(main())
     return sent
 
 
 def test_mock_run_streams_every_step_in_order():
-    sent = run(build_graph(MockLLM(), InMemorySaver()))
+    sent = run(build_graph(MockLLM(delay_s=0), InMemorySaver()))
 
     assert all(room == "demo" for room, _ in sent)
     events = [m["event"] for _, m in sent if m["type"] == "event"]
@@ -39,9 +44,12 @@ def test_mock_run_streams_every_step_in_order():
         "thought", "tool_call", "tool_result",
         "thought", "tool_call", "tool_result",
         "thought", "tool_call", "tool_result",
+        "thought", "tool_call", "approval_request", "human", "tool_result",
         "final",
     ]
-    assert [e["toolName"] for e in events if e["type"] == "tool_result"] == ["search_web", "read_page", "save_note"]
+    assert [e["toolName"] for e in events if e["type"] == "tool_result"] == [
+        "search_web", "read_page", "save_note", "send_email"
+    ]
     assert sent[-1][1] == {"type": "run_updated", "runId": events[0]["runId"], "patch": {"status": "done"}}
 
 

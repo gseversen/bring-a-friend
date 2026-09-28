@@ -5,6 +5,8 @@ from contextlib import aclosing, suppress
 from dataclasses import dataclass, field
 from typing import Any
 
+from langgraph.types import Command
+
 from app.events import HumanAction, RunInfo, RunStatus, TimelineEvent, events_from_update
 
 logger = logging.getLogger(__name__)
@@ -44,6 +46,13 @@ class Run:
     # The background task driving the graph, while one is active.
     driver: asyncio.Task | None = None
     pause_requested_by: str | None = None
+    # The interrupt payload ({id, toolName, args}) while awaiting approval.
+    pending_approval: dict | None = None
+    # The most recent decision, so a late duplicate gets a clear 409.
+    last_decision: dict | None = None
+    # tool_use id -> tool name, so results can be labeled even when the call
+    # happened before a pause.
+    tool_names: dict[str, str] = field(default_factory=dict)
 
 
 class RunManager:
@@ -82,9 +91,14 @@ class RunManager:
             raise NotFound("No run with that id")
 
         # snapshot.next is the node(s) that would run next; empty means the
-        # graph reached END. A task with an error means the last node failed.
+        # graph reached END. A task with an error means the last node failed,
+        # and snapshot.interrupts holds any interrupt() waiting for a resume.
+        pending = None
         if any(task.error for task in snapshot.tasks):
             status: RunStatus = "error"
+        elif snapshot.interrupts:
+            status = "awaiting_approval"
+            pending = snapshot.interrupts[0].value
         elif snapshot.next:
             # Whatever it was doing when the agent stopped, it can continue
             # from the last checkpoint, so it comes back as paused.
@@ -95,9 +109,14 @@ class RunManager:
         # Another command may have recovered this run while we awaited.
         if run_id in self.runs:
             return self.runs[run_id]
-        run = self.runs[run_id] = Run(id=run_id, room=snapshot.metadata["room"], status=status)
+        run = self.runs[run_id] = Run(
+            id=run_id, room=snapshot.metadata["room"], status=status, pending_approval=pending
+        )
+        for message in snapshot.values["messages"]:
+            if message["role"] == "assistant":
+                run.tool_names.update({b["id"]: b["name"] for b in message["content"] if b["type"] == "tool_use"})
         # The doc may still show a stale status from before the restart.
-        await self._update(run, status=status)
+        await self._update(run, status=status, pendingApproval=pending)
         return run
 
     async def pause(self, run_id: str, by: str) -> None:
@@ -137,14 +156,37 @@ class RunManager:
         self._drive(run, {"messages": [{"role": "user", "content": task}]})
         return run.id
 
+    async def decide(self, run_id: str, by: str, approval_id: str, approved: bool, reason: str | None) -> None:
+        run = await self._get(run_id)
+        verb = "approve" if approved else "reject"
+        async with run.lock:
+            last = run.last_decision
+            if last and last["id"] == approval_id:
+                raise Conflict(f"{last['by']} already {'approved' if last['approved'] else 'rejected'} this call")
+            if run.status != "awaiting_approval":
+                raise Conflict(f"Can't {verb}: the run is {DESCRIBE[run.status]}")
+            if run.pending_approval["id"] != approval_id:
+                raise Conflict(f"Can't {verb}: that tool call is no longer the one waiting for approval")
+
+            tool = run.pending_approval["toolName"]
+            run.last_decision = {"id": approval_id, "by": by, "approved": approved}
+            run.pending_approval = None
+            await self._update(run, status="running", pendingApproval=None)
+            detail = f": {reason}" if reason else ""
+            await self._human(run, by, "approve" if approved else "reject", f"{by} {verb}d {tool}{detail}")
+            # Command(resume=...) re-runs the approval node, and interrupt()
+            # returns this value there. It records who decided and why.
+            self._drive(run, Command(resume={"approved": approved, "by": by, "reason": reason}))
+
     def _drive(self, run: Run, graph_input: Any) -> None:
         """Start (or continue) the graph in the background. `graph_input` is the
-        initial state for a new run, or None to continue from the checkpoint."""
+        initial state for a new run, None to continue from the checkpoint, or a
+        Command(resume=...) answering a pending interrupt."""
         run.driver = asyncio.create_task(self._run_graph(run, graph_input))
 
     async def _run_graph(self, run: Run, graph_input: Any) -> None:
-        tool_names: dict[str, str] = {}
         status: RunStatus = "done"
+        pending = None
         try:
             # stream_mode="updates" yields {node_name: node_output} after every
             # node, so each step reaches the timeline as soon as it finishes.
@@ -154,8 +196,14 @@ class RunManager:
             stream = self.graph.astream(graph_input, self._config(run), stream_mode="updates", durability="sync")
             async with aclosing(stream):
                 async for update in stream:
+                    if "__interrupt__" in update:
+                        # interrupt() was called: the graph has stopped and
+                        # checkpointed, and the stream ends here.
+                        status = "awaiting_approval"
+                        pending = update["__interrupt__"][0].value
+                        break
                     for node, node_output in update.items():
-                        for event in events_from_update(node, node_output, run.id, tool_names):
+                        for event in events_from_update(node, node_output, run.id, run.tool_names):
                             await self._event(run, event)
                     if run.status == "pausing":
                         # The node that just finished is already checkpointed, so
@@ -171,8 +219,16 @@ class RunManager:
         # Take the lock so this final status can't interleave with a command.
         async with run.lock:
             run.status = status
+            run.pending_approval = pending
             with suppress(Exception):
-                await self._update(run, status=status)
+                if pending:
+                    await self._event(run, TimelineEvent(
+                        run_id=run.id, type="approval_request", tool_name=pending["toolName"],
+                        args=pending["args"], content=f"{pending['toolName']} needs a participant's approval",
+                    ))
+                    await self._update(run, status=status, pendingApproval=pending)
+                else:
+                    await self._update(run, status=status)
 
     async def wait(self, run_id: str) -> None:
         """Wait for the run's current driver to stop (used by tests)."""
