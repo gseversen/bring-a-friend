@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 
 import httpx2
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -38,6 +38,11 @@ async def conflict_handler(_: Request, exc: Conflict) -> JSONResponse:
     return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 
+@app.exception_handler(httpx2.HTTPError)
+async def sync_error_handler(_: Request, exc: httpx2.HTTPError) -> JSONResponse:
+    return JSONResponse(status_code=502, content={"detail": "Sync server unreachable"})
+
+
 @app.exception_handler(NotFound)
 async def not_found_handler(_: Request, exc: NotFound) -> JSONResponse:
     return JSONResponse(status_code=404, content={"detail": str(exc)})
@@ -49,14 +54,27 @@ class StartRunRequest(CamelModel):
     started_by: str = Field(min_length=1, max_length=100)
 
 
+class CommandRequest(CamelModel):
+    by: str = Field(min_length=1, max_length=100)
+
+
 @app.post("/runs", status_code=202)
 async def start_run(req: StartRunRequest) -> dict:
-    try:
-        run_id = await manager.start(req.room, req.task, req.started_by)
-    except httpx2.HTTPError:
-        raise HTTPException(502, "Sync server unreachable")
     # Return immediately; clients watch progress through the shared doc, not this response.
-    return {"runId": run_id}
+    return {"runId": await manager.start(req.room, req.task, req.started_by)}
+
+
+# Commands return as soon as they're accepted; their effects arrive through the doc.
+@app.post("/runs/{run_id}/pause", status_code=202)
+async def pause_run(run_id: str, req: CommandRequest) -> dict:
+    await manager.pause(run_id, req.by)
+    return {"ok": True}
+
+
+@app.post("/runs/{run_id}/resume", status_code=202)
+async def resume_run(run_id: str, req: CommandRequest) -> dict:
+    await manager.resume(run_id, req.by)
+    return {"ok": True}
 
 
 @app.get("/health")

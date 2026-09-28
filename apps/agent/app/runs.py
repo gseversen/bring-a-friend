@@ -1,17 +1,28 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
+from contextlib import aclosing, suppress
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.events import RunInfo, RunStatus, TimelineEvent, events_from_update
+from app.events import HumanAction, RunInfo, RunStatus, TimelineEvent, events_from_update
 
 logger = logging.getLogger(__name__)
 
 Send = Callable[[str, dict], Awaitable[None]]
 
 FINISHED: set[RunStatus] = {"done", "error"}
+
+# For conflict messages: "Can't resume: the run is <...>".
+DESCRIBE: dict[RunStatus, str] = {
+    "idle": "not started",
+    "running": "running",
+    "pausing": "already pausing",
+    "paused": "paused",
+    "awaiting_approval": "waiting for an approval decision",
+    "done": "finished",
+    "error": "stopped with an error",
+}
 
 
 class Conflict(Exception):
@@ -32,6 +43,7 @@ class Run:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # The background task driving the graph, while one is active.
     driver: asyncio.Task | None = None
+    pause_requested_by: str | None = None
 
 
 class RunManager:
@@ -56,6 +68,60 @@ class RunManager:
     async def _event(self, run: Run, event: TimelineEvent) -> None:
         await self.send(run.room, {"type": "event", "event": event.dump()})
 
+    async def _human(self, run: Run, by: str, action: HumanAction, content: str) -> None:
+        """Attribution: every steering action shows up on the timeline with who did it."""
+        await self._event(run, TimelineEvent(run_id=run.id, type="human", actor=by, action=action, content=content))
+
+    async def _get(self, run_id: str) -> Run:
+        """Find a run, rebuilding it from its checkpoint if this process doesn't
+        know it (e.g. the agent restarted while the run was paused)."""
+        if run_id in self.runs:
+            return self.runs[run_id]
+        snapshot = await self.graph.aget_state({"configurable": {"thread_id": run_id}})
+        if not snapshot.values:
+            raise NotFound("No run with that id")
+
+        # snapshot.next is the node(s) that would run next; empty means the
+        # graph reached END. A task with an error means the last node failed.
+        if any(task.error for task in snapshot.tasks):
+            status: RunStatus = "error"
+        elif snapshot.next:
+            # Whatever it was doing when the agent stopped, it can continue
+            # from the last checkpoint, so it comes back as paused.
+            status = "paused"
+        else:
+            status = "done"
+
+        # Another command may have recovered this run while we awaited.
+        if run_id in self.runs:
+            return self.runs[run_id]
+        run = self.runs[run_id] = Run(id=run_id, room=snapshot.metadata["room"], status=status)
+        # The doc may still show a stale status from before the restart.
+        await self._update(run, status=status)
+        return run
+
+    async def pause(self, run_id: str, by: str) -> None:
+        run = await self._get(run_id)
+        async with run.lock:
+            if run.status == "pausing":
+                raise Conflict(f"{run.pause_requested_by} already asked the agent to pause")
+            if run.status != "running":
+                raise Conflict(f"Can't pause: the run is {DESCRIBE[run.status]}")
+            # Cooperative: the driver notices this after the current node finishes.
+            run.pause_requested_by = by
+            await self._update(run, status="pausing")
+            await self._human(run, by, "pause", f"{by} asked the agent to pause")
+
+    async def resume(self, run_id: str, by: str) -> None:
+        run = await self._get(run_id)
+        async with run.lock:
+            if run.status != "paused":
+                raise Conflict(f"Can't resume: the run is {DESCRIBE[run.status]}")
+            await self._update(run, status="running")
+            await self._human(run, by, "resume", f"{by} resumed the agent")
+            # None as input means "no new input: continue from the latest checkpoint".
+            self._drive(run, None)
+
     async def start(self, room: str, task: str, started_by: str) -> str:
         # No await between this check and claiming the room, so two
         # simultaneous starts can't both pass it.
@@ -73,7 +139,7 @@ class RunManager:
 
     def _drive(self, run: Run, graph_input: Any) -> None:
         """Start (or continue) the graph in the background. `graph_input` is the
-        initial state for a new run."""
+        initial state for a new run, or None to continue from the checkpoint."""
         run.driver = asyncio.create_task(self._run_graph(run, graph_input))
 
     async def _run_graph(self, run: Run, graph_input: Any) -> None:
@@ -84,21 +150,29 @@ class RunManager:
             # node, so each step reaches the timeline as soon as it finishes.
             # durability="sync" makes LangGraph finish saving each checkpoint
             # before the next node starts, so stopping between nodes is safe.
-            async for update in self.graph.astream(
-                graph_input, self._config(run), stream_mode="updates", durability="sync"
-            ):
-                for node, node_output in update.items():
-                    for event in events_from_update(node, node_output, run.id, tool_names):
-                        await self._event(run, event)
+            # aclosing() closes the stream as soon as we break out of it.
+            stream = self.graph.astream(graph_input, self._config(run), stream_mode="updates", durability="sync")
+            async with aclosing(stream):
+                async for update in stream:
+                    for node, node_output in update.items():
+                        for event in events_from_update(node, node_output, run.id, tool_names):
+                            await self._event(run, event)
+                    if run.status == "pausing":
+                        # The node that just finished is already checkpointed, so
+                        # we can simply stop reading. Resume picks up at the next node.
+                        status = "paused"
+                        break
         except Exception as exc:
             logger.exception("run %s failed", run.id)
             status = "error"
             # The sync server may be what failed, so reporting the error is best effort.
             with suppress(Exception):
                 await self._event(run, TimelineEvent(run_id=run.id, type="error", content=str(exc)))
-        with suppress(Exception):
-            await self._update(run, status=status)
-        run.status = status
+        # Take the lock so this final status can't interleave with a command.
+        async with run.lock:
+            run.status = status
+            with suppress(Exception):
+                await self._update(run, status=status)
 
     async def wait(self, run_id: str) -> None:
         """Wait for the run's current driver to stop (used by tests)."""
